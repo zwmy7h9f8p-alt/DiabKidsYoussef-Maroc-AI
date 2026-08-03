@@ -1,4 +1,4 @@
-name: Temporary Ciqual 2025 translation transfer
+name: Temporary Ciqual 2025 NLLB translation
 
 on:
   push:
@@ -18,7 +18,7 @@ permissions:
 jobs:
   translate-and-upload:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 55
     steps:
       - name: Download and verify official Ciqual 2025 workbook
         shell: bash
@@ -31,12 +31,12 @@ jobs:
       - name: Install translation dependencies
         run: |
           python -m pip install --quiet --index-url https://download.pytorch.org/whl/cpu torch
-          python -m pip install --quiet 'transformers<5' sentencepiece sacremoses pandas openpyxl
+          python -m pip install --quiet 'transformers<5' sentencepiece pandas openpyxl accelerate safetensors
 
-      - name: Translate French labels to Arabic
+      - name: Translate all French labels with NLLB
         shell: bash
         run: |
-          cat > /tmp/translate_ciqual.py <<'PY'
+          cat > /tmp/translate_ciqual_nllb.py <<'PY'
           import json
           import re
           from pathlib import Path
@@ -49,32 +49,36 @@ jobs:
           comp = sheets['composition nutritionnelle']
           infoods = sheets['codes INFOODS']
 
-          cols = ['alim_grp_nom_fr', 'alim_ssgrp_nom_fr', 'alim_ssssgrp_nom_fr', 'alim_nom_fr']
           texts = []
-          for col in cols:
+          for col in ['alim_grp_nom_fr', 'alim_ssgrp_nom_fr', 'alim_ssssgrp_nom_fr', 'alim_nom_fr']:
               for value in comp[col].dropna().tolist():
                   s = re.sub(r'\s+', ' ', str(value)).strip()
-                  if s and s != '-':
-                      texts.append(s)
+                  if s and s != '-': texts.append(s)
           for value in infoods['const_nom_fr'].dropna().tolist():
               s = re.sub(r'\s+', ' ', str(value)).strip()
-              if s and s != '-':
-                  texts.append(s)
+              if s and s != '-': texts.append(s)
           texts = list(dict.fromkeys(texts))
 
-          model_name = 'Helsinki-NLP/opus-mt-fr-ar'
-          tokenizer = AutoTokenizer.from_pretrained(model_name)
-          model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+          model_name = 'facebook/nllb-200-distilled-600M'
+          tokenizer = AutoTokenizer.from_pretrained(model_name, src_lang='fra_Latn')
+          model = AutoModelForSeq2SeqLM.from_pretrained(model_name, low_cpu_mem_usage=True)
           model.eval()
           torch.set_num_threads(4)
+          forced_bos = tokenizer.convert_tokens_to_ids('arb_Arab')
 
           translations = {}
-          batch_size = 64
+          batch_size = 12
           with torch.inference_mode():
               for start in range(0, len(texts), batch_size):
                   batch = texts[start:start+batch_size]
                   enc = tokenizer(batch, return_tensors='pt', padding=True, truncation=True, max_length=160)
-                  out = model.generate(**enc, num_beams=2, max_new_tokens=180, early_stopping=True)
+                  out = model.generate(
+                      **enc,
+                      forced_bos_token_id=forced_bos,
+                      num_beams=2,
+                      max_new_tokens=180,
+                      early_stopping=True,
+                  )
                   arabic = tokenizer.batch_decode(out, skip_special_tokens=True)
                   for fr, ar in zip(batch, arabic):
                       translations[fr] = re.sub(r'\s+', ' ', ar).strip()
@@ -82,21 +86,23 @@ jobs:
 
           payload = {
               'model': model_name,
+              'source_language': 'fra_Latn',
+              'target_language': 'arb_Arab',
               'decoding': 'beam2',
               'source_md5': '0d9758ce23f3f13dd63a005bc1bb4f2c',
               'count': len(translations),
               'translations': translations,
           }
-          Path('/tmp/ciqual_fr_ar_mt.json').write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+          Path('/tmp/ciqual_fr_ar_nllb.json').write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
           PY
-          python /tmp/translate_ciqual.py
+          python /tmp/translate_ciqual_nllb.py
 
-      - name: Upload verified source and draft translations
+      - name: Upload verified source and NLLB translations
         uses: actions/upload-artifact@v4
         with:
-          name: ciqual-2025-source-and-arabic-mt-fast
+          name: ciqual-2025-source-and-arabic-nllb
           path: |
             /tmp/Table Ciqual 2025_FR_2025_11_03.xlsx
-            /tmp/ciqual_fr_ar_mt.json
+            /tmp/ciqual_fr_ar_nllb.json
           if-no-files-found: error
           retention-days: 1
