@@ -6,6 +6,11 @@ on:
       - temp-ciqual-2025-transfer
     paths:
       - .github/workflows/fetch-ciqual-transfer.yml
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .github/workflows/fetch-ciqual-transfer.yml
 
 permissions:
   contents: write
