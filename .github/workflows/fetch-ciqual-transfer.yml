@@ -1,4 +1,4 @@
-name: Temporary Ciqual 2025 transfer
+name: Temporary Ciqual 2025 translation transfer
 
 on:
   push:
@@ -16,8 +16,9 @@ permissions:
   contents: read
 
 jobs:
-  fetch-and-upload:
+  translate-and-upload:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Download and verify official Ciqual 2025 workbook
         shell: bash
@@ -26,13 +27,75 @@ jobs:
           URL='https://entrepot.recherche.data.gouv.fr/api/access/datafile/:persistentId?persistentId=doi:10.57745/RPWYZD'
           curl -L --fail --retry 5 --retry-all-errors -o '/tmp/Table Ciqual 2025_FR_2025_11_03.xlsx' "$URL"
           test "$(md5sum '/tmp/Table Ciqual 2025_FR_2025_11_03.xlsx' | awk '{print $1}')" = '0d9758ce23f3f13dd63a005bc1bb4f2c'
-          sha256sum '/tmp/Table Ciqual 2025_FR_2025_11_03.xlsx'
-          stat -c '%n %s bytes' '/tmp/Table Ciqual 2025_FR_2025_11_03.xlsx'
 
-      - name: Upload verified workbook
+      - name: Install translation dependencies
+        run: |
+          python -m pip install --quiet 'transformers<5' sentencepiece sacremoses pandas openpyxl
+
+      - name: Translate French labels to Arabic
+        shell: bash
+        run: |
+          cat > /tmp/translate_ciqual.py <<'PY'
+          import json
+          import re
+          from pathlib import Path
+          import pandas as pd
+          import torch
+          from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+
+          source = Path('/tmp/Table Ciqual 2025_FR_2025_11_03.xlsx')
+          sheets = pd.read_excel(source, sheet_name=None, dtype=object)
+          comp = sheets['composition nutritionnelle']
+          infoods = sheets['codes INFOODS']
+
+          cols = ['alim_grp_nom_fr', 'alim_ssgrp_nom_fr', 'alim_ssssgrp_nom_fr', 'alim_nom_fr']
+          texts = []
+          for col in cols:
+              for value in comp[col].dropna().tolist():
+                  s = re.sub(r'\s+', ' ', str(value)).strip()
+                  if s and s != '-':
+                      texts.append(s)
+          for value in infoods['const_nom_fr'].dropna().tolist():
+              s = re.sub(r'\s+', ' ', str(value)).strip()
+              if s and s != '-':
+                  texts.append(s)
+          texts = list(dict.fromkeys(texts))
+
+          model_name = 'Helsinki-NLP/opus-mt-fr-ar'
+          tokenizer = AutoTokenizer.from_pretrained(model_name)
+          model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+          model.eval()
+          torch.set_num_threads(4)
+
+          translations = {}
+          batch_size = 32
+          with torch.inference_mode():
+              for start in range(0, len(texts), batch_size):
+                  batch = texts[start:start+batch_size]
+                  enc = tokenizer(batch, return_tensors='pt', padding=True, truncation=True, max_length=160)
+                  out = model.generate(**enc, num_beams=4, max_new_tokens=180, early_stopping=True)
+                  arabic = tokenizer.batch_decode(out, skip_special_tokens=True)
+                  for fr, ar in zip(batch, arabic):
+                      ar = re.sub(r'\s+', ' ', ar).strip()
+                      translations[fr] = ar
+                  print(f'{min(start+batch_size, len(texts))}/{len(texts)}', flush=True)
+
+          payload = {
+              'model': model_name,
+              'source_md5': '0d9758ce23f3f13dd63a005bc1bb4f2c',
+              'count': len(translations),
+              'translations': translations,
+          }
+          Path('/tmp/ciqual_fr_ar_mt.json').write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+          PY
+          python /tmp/translate_ciqual.py
+
+      - name: Upload verified source and draft translations
         uses: actions/upload-artifact@v4
         with:
-          name: ciqual-2025-original
-          path: /tmp/Table Ciqual 2025_FR_2025_11_03.xlsx
+          name: ciqual-2025-source-and-arabic-mt
+          path: |
+            /tmp/Table Ciqual 2025_FR_2025_11_03.xlsx
+            /tmp/ciqual_fr_ar_mt.json
           if-no-files-found: error
           retention-days: 1
