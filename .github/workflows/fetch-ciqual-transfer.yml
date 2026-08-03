@@ -1,0 +1,49 @@
+name: Temporary Ciqual 2025 transfer
+
+on:
+  push:
+    branches:
+      - temp-ciqual-2025-transfer
+    paths:
+      - .github/workflows/fetch-ciqual-transfer.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fetch-and-split:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout transfer branch
+        uses: actions/checkout@v4
+        with:
+          ref: temp-ciqual-2025-transfer
+
+      - name: Download and verify official Ciqual 2025 workbook
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL='https://entrepot.recherche.data.gouv.fr/api/access/datafile/:persistentId?persistentId=doi:10.57745/RPWYZD'
+          curl -L --fail --retry 5 --retry-all-errors -o /tmp/ciqual.xlsx "$URL"
+          test "$(md5sum /tmp/ciqual.xlsx | awk '{print $1}')" = '0d9758ce23f3f13dd63a005bc1bb4f2c'
+          mkdir -p transfer_ciqual_2025
+          base64 -w 0 /tmp/ciqual.xlsx > /tmp/ciqual.b64
+          split -b 90000 -d -a 3 /tmp/ciqual.b64 transfer_ciqual_2025/part_
+          {
+            echo 'filename=Table Ciqual 2025_FR_2025_11_03.xlsx'
+            echo 'md5=0d9758ce23f3f13dd63a005bc1bb4f2c'
+            echo "sha256=$(sha256sum /tmp/ciqual.xlsx | awk '{print $1}')"
+            echo "bytes=$(stat -c%s /tmp/ciqual.xlsx)"
+            echo "base64_bytes=$(stat -c%s /tmp/ciqual.b64)"
+            echo "parts=$(find transfer_ciqual_2025 -name 'part_*' | wc -l)"
+          } > transfer_ciqual_2025/manifest.txt
+
+      - name: Commit temporary transfer chunks
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'ciqual-transfer-bot'
+          git config user.email 'ciqual-transfer-bot@users.noreply.github.com'
+          git add transfer_ciqual_2025
+          git commit -m 'Temporary: transfer official Ciqual 2025 workbook'
+          git push origin HEAD:temp-ciqual-2025-transfer
